@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Continuum Phase 1.2 - PostgreSQL RDS instance, created via CloudFormation
+  so the Terraform-import path can be practiced afterward. Lives in the
+  Terraform-managed VPC's private subnets. RETIRED: all resources set to
+  DeletionPolicy Retain so this stack can be deleted while Terraform keeps
+  ownership of the imported resources.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC created by the Terraform vpc module.
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs (needs 2+ in different AZs even for single-AZ RDS).
+
+  VpcCidr:
+    Type: String
+    Default: 10.50.0.0/16
+    Description: CIDR allowed to reach Postgres. Scoped to the VPC, never 0.0.0.0/0.
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    Description: >
+      db.t3.micro is the cheapest class orderable for Postgres 18.6 in
+      us-east-1 - db.t4g.micro is NOT offered for this engine version.
+
+  EngineVersion:
+    Type: String
+    Default: '18.6'
+
+  DBName:
+    Type: String
+    Default: continuum
+
+  MasterUsername:
+    Type: String
+    Default: continuumadmin
+
+Resources:
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    # Retain: Terraform now owns this resource (imported Phase 1.2).
+    # Deleting this stack must not delete the resource.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DBSubnetGroupDescription: Continuum Postgres - private subnets only
+      SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Name
+          Value: continuum-db-subnet-group
+        - Key: Project
+          Value: continuum
+        - Key: ManagedBy
+          Value: cloudformation
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      GroupDescription: Continuum Postgres - inbound 5432 from inside the VPC only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref VpcCidr
+          Description: Postgres from within the VPC
+      Tags:
+        - Key: Name
+          Value: continuum-db-sg
+        - Key: Project
+          Value: continuum
+        - Key: ManagedBy
+          Value: cloudformation
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    # Originally DeletionPolicy: Delete (CloudFormation's RDS default is
+    # Snapshot, which leaves a billable snapshot behind). Changed to Retain
+    # after the Terraform import so deleting this stack hands the database
+    # over rather than destroying it. Teardown is now terraform destroy,
+    # where skip_final_snapshot = true keeps the no-snapshot behavior.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DBInstanceIdentifier: continuum-postgres
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: '20'
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref MasterUsername
+      # RDS generates the password, stores it in Secrets Manager, and owns
+      # rotation. No plaintext password in this template, the stack
+      # parameters, shell history, or Terraform state after import.
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 0
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: continuum-postgres
+        - Key: Project
+          Value: continuum
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  DBEndpoint:
+    Description: Postgres connection endpoint
+    Value: !GetAtt DBInstance.Endpoint.Address
+
+  DBPort:
+    Value: !GetAtt DBInstance.Endpoint.Port
+
+  DBInstanceIdentifier:
+    Description: Needed as the import ID for terraform import
+    Value: !Ref DBInstance
+
+  MasterSecretArn:
+    Description: Secrets Manager ARN holding the RDS-managed master password
+    Value: !GetAtt DBInstance.MasterUserSecret.SecretArn
+
+  DBSecurityGroupId:
+    Value: !Ref DBSecurityGroup
+
+  DBSubnetGroupName:
+    Value: !Ref DBSubnetGroup
